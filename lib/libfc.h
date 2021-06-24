@@ -288,6 +288,36 @@ extern int libfc_add_specfile(const char *specfilename);
 
 extern void libfc_initialize_logging(const char *lpfilename);
     
+typedef void placement_exporter_t; 
+ 
+extern placement_exporter_t*
+libfc_placement_exporter_new(uint32_t observation_domain, uint8_t* msg_buf, 
+	uint32_t msg_buf_size, uint32_t* sequence_number_ptr);
+
+extern void
+libfc_placement_exporter_delete(placement_exporter_t* pe);
+
+extern int
+libfc_placement_exporter_place_values(placement_exporter_t* pe, 
+		struct libfc_template_t* t, bool write_templates);
+		
+extern int
+libfc_placement_exporter_add_template(placement_exporter_t* pe, 
+		struct libfc_template_t* t, uint16_t template_id);
+		
+extern void
+libfc_placement_exporter_reset(placement_exporter_t* pe);
+
+extern int
+libfc_placement_exporter_start_message(placement_exporter_t* pe, time_t now,
+		  bool inc_sequence_number);
+
+extern int
+libfc_placement_exporter_complete_message(placement_exporter_t* pe);
+
+extern void
+libfc_placement_exporter_set_buf(placement_exporter_t* pe, uint8_t* buf, uint32_t buf_size);
+    
 #  if defined(__cplusplus)
 }
 #  endif /* defined(__cplusplus) */

@@ -12,15 +12,15 @@ else(LOG4CPLUS_FOUND)
   set(Log4CPlus_LIBRARIES "")
 endif(LOG4CPLUS_FOUND)
 
-find_package(Boost 1.42 COMPONENTS unit_test_framework REQUIRED)
-if (Boost_FOUND)
-  include_directories (${Boost_INCLUDE_DIRS})
-endif(Boost_FOUND)
+#find_package(Boost 1.42 COMPONENTS unit_test_framework REQUIRED)
+#if (Boost_FOUND)
+#  include_directories (${Boost_INCLUDE_DIRS})
+#endif(Boost_FOUND)
  
-find_package(Wandio REQUIRED)
-if (WANDIO_FOUND)
-  include_directories(${Wandio_INCLUDE_DIRS}) 
-endif(WANDIO_FOUND)
+#find_package(Wandio REQUIRED)
+#if (WANDIO_FOUND)
+#  include_directories(${Wandio_INCLUDE_DIRS}) 
+#endif(WANDIO_FOUND)
 
 
 # debuggery
@@ -41,6 +41,9 @@ else ($ENV{CLANG})
 endif($ENV{CLANG})
 include_directories(.)
 
+#DPDK
+message(STATUS "DPDK include $ENV{RTE_SDK}/$ENV{RTE_TARGET}/include")
+include_directories($ENV{RTE_SDK}/$ENV{RTE_TARGET}/include)
 
 # core objects; library classes begin with a upper-case letter,
 # program files (containing main()) with a lower-case letter.
@@ -64,13 +67,13 @@ file (GLOB EXCEPTIONS_OBJ "lib/exceptions/*.cpp")
 
 add_library (fc ${FC_OBJ} ${EXCEPTIONS_OBJ})
 
-add_executable(ipfix2csv ipfix2csv.cpp)
-target_link_libraries(ipfix2csv fc ${Boost_LIBRARIES}
-                                ${Wandio_LIBRARIES}
-                                ${Log4CPlus_LIBRARIES})
+#add_executable(ipfix2csv ipfix2csv.cpp)
+#target_link_libraries(ipfix2csv fc ${Boost_LIBRARIES}
+#                                ${Wandio_LIBRARIES}
+#                                ${Log4CPlus_LIBRARIES})
 
-add_executable(cbinding cbinding.c)
-target_link_libraries(cbinding fc ${Wandio_LIBRARIES})
+#add_executable(cbinding cbinding.c)
+#target_link_libraries(cbinding fc ${Wandio_LIBRARIES})
 
 if ($ENV{CLANG}) 
   target_link_libraries (fc c++)
@@ -81,11 +84,11 @@ endif($ENV{CLANG})
 if ($ENV{CLANG})
   message(STATUS "skipping unit tests, because you're using clang.")
 else ($ENV{CLANG})
-  file (GLOB UT_OBJ test/Test*.cpp)
-  add_executable(fctest ${UT_OBJ})
-  target_link_libraries(fctest fc ${Boost_LIBRARIES}
-                                  ${Wandio_LIBRARIES}
-                                  ${Log4CPlus_LIBRARIES})
+#  file (GLOB UT_OBJ test/Test*.cpp)
+#  add_executable(fctest ${UT_OBJ})
+#  target_link_libraries(fctest fc ${Boost_LIBRARIES}
+#                                  ${Wandio_LIBRARIES}
+#                                  ${Log4CPlus_LIBRARIES})
 endif()
 
 if ($ENV{CLANG})
@@ -102,6 +105,5 @@ endif()
 if (CMAKE_BUILD_TYPE STREQUAL "Profile")
   add_executable(fcprof fcprof.cpp test/TestCommon.cpp)
   target_link_libraries(fcprof fc ${Boost_LIBRARIES}
-                                ${Wandio_LIBRARIES} 
                                ${Log4CPlus_LIBRARIES})
 endif()  

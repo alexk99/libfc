@@ -26,6 +26,7 @@
 #include <climits>
 
 #include <arpa/inet.h>
+#include <rte_byteorder.h>
 
 #if defined(_libfc_HAVE_LOG4CPLUS_)
 #  include <log4cplus/loggingmacros.h>
@@ -74,11 +75,17 @@ namespace libfc {
   }
 
   PlacementTemplate::~PlacementTemplate() {
+		if (placements.size() > 0) {
+			for (auto i = placements.begin(); i != placements.end(); ++i)
+				delete i->second;	
+		}
+		
     delete[] buf;
   }
 
   bool PlacementTemplate::register_placement(const InfoElement* ie,
                                              void* p, size_t size) {
+	assert(ie != NULL);
     if (size == 0)
       size = ie->len();
     placements[ie] = new PlacementInfo(ie, p, size);
@@ -149,15 +156,17 @@ namespace libfc {
       return 0;
   }
 
-  void PlacementTemplate::wire_template(
-      uint16_t _template_id,
-      const uint8_t** _buf,
-      size_t* _size) const {
-    LOG4CPLUS_TRACE(logger, "ENTER wire_template");
-    if (buf == 0) {
-      LOG4CPLUS_TRACE(logger,
-                      "  computing wire template, id=" << _template_id);
+/*
+ * Returns: 
+ *	> 0 - ok, size of template record
+ *  <0 - error
+ */
+int
+PlacementTemplate::wire_template(uint16_t _template_id, uint8_t* _buf, uint32_t _buf_size) const 
+{ 
+	LOG4CPLUS_TRACE(logger, "computing wire template, id=" << _template_id);
       assert(_template_id != 0);
+	
       /* Templates start with a 2-byte template ID and a 2-byte field
        * count. */
       size =  sizeof(uint16_t) + sizeof(uint16_t);
@@ -167,56 +176,50 @@ namespace libfc {
         /* A template record is 2 bytes for the IE id, 2 bytes for
          * the field length and a potential 4 more bytes for the
          * private enterprise number, if there is one. */
-        size = size + sizeof(uint16_t) + sizeof(uint16_t)
+		size += sizeof(uint16_t) + sizeof(uint16_t)
           + (i->first->pen() == 0 ? 0 : sizeof(uint32_t));
         n_fields++;
       }
 
-      buf = new uint8_t[size];
+	if (size > _buf_size)
+		/* not enough space */
+		return -1;
 
-      uint8_t* p = buf + sizeof(uint16_t);
+	/* template ID */
+	template_id = _template_id;
+	_template_id = rte_cpu_to_be_16(_template_id);
+	memcpy(_buf, &_template_id, sizeof(_template_id));
+	_buf += sizeof(_template_id);
 
-      n_fields = htons(n_fields);
-      assert(p + sizeof(n_fields) <= buf + size);
-      memcpy(p, &n_fields, sizeof n_fields); p += sizeof n_fields;
+	/* field count */
+	n_fields = rte_cpu_to_be_16(n_fields);
+	memcpy(_buf, &n_fields, sizeof(n_fields));
+	_buf += sizeof(n_fields);
+
       
-      /* Use IES, not PLACEMENTS for iteration, because now, sequence
-       * matters. */
+	/* Use IES, not PLACEMENTS for iteration, because now, 
+	 * sequence matters. */
       for (auto i = ies.begin(); i != ies.end(); ++i) {
-        LOG4CPLUS_TRACE(logger,
-                        "  wire template for (" << (*i)->pen()
-                        << "/" << (*i)->number()
-                        << ")[" << (*i)->len() << "]");
-
-        uint32_t ie_pen = htonl((*i)->pen());
-        uint16_t ie_id = htons((*i)->number()
-                               | (ie_pen == 0 ? 0 : (1 << 15)));
-        uint16_t ie_len = htons((*i)->len());
-        assert(p + sizeof(ie_id) <= buf + size);
-        memcpy(p, &ie_id, sizeof ie_id); p += sizeof ie_id;
-        assert(p + sizeof(ie_len) <= buf + size);
-        memcpy(p, &ie_len, sizeof ie_len); p += sizeof ie_len;
+		uint32_t ie_pen = rte_cpu_to_be_32((*i)->pen());
+		uint16_t ie_id = rte_cpu_to_be_16((*i)->number() | (ie_pen == 0 ? 0 : (1 << 15)));
+		uint16_t ie_len = rte_cpu_to_be_16((*i)->len());
+		memcpy(_buf, &ie_id, sizeof(ie_id)); 
+		_buf += sizeof(ie_id);
+		memcpy(_buf, &ie_len, sizeof(ie_len)); 
+		_buf += sizeof(ie_len);
 
         if (ie_pen != 0) {
-          assert(p + sizeof(ie_pen) <= buf + size);
-          memcpy(p, &ie_pen, sizeof ie_pen);
-          p += sizeof ie_pen;
+			memcpy(_buf, &ie_pen, sizeof(ie_pen));
+			_buf += sizeof(ie_pen);
         }
       }
-      assert(p <= buf + size);
 
-      /* Can set template ID only once. */
-      template_id = _template_id;
-      _template_id = htons(_template_id);
-      assert(buf + sizeof(_template_id) <= buf + size);
-      memcpy(buf, &_template_id, sizeof _template_id);
-    }
+	return size;
+}
 
-    if (_buf != 0)
-      *_buf = buf;
-    *_size = size;
-  }
-
+/*
+ *
+ */
   size_t PlacementTemplate::data_record_size() const {
     size_t ret = fixlen_data_record_size;
 

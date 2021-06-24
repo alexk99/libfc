@@ -31,11 +31,13 @@
 #include <sstream>
 
 #include <unistd.h>
+// todo use rte_cpu_to_be 
+#include <arpa/inet.h>
 
 #if defined(_libfc_HAVE_LOG4CPLUS_)
 #  include <log4cplus/loggingmacros.h>
 #else
-#  define LOG4CPLUS_TRACE(logger, expr)
+#define LOG4CPLUS_TRACE(...)
 #endif /* defined(_libfc_HAVE_LOG4CPLUS_) */
 
 #include "ipfix_endian.h"
@@ -438,7 +440,8 @@ EncodePlan::EncodePlan(const libfc::PlacementTemplate* placement_template)
       /* See comment on kIpv4Address. */
       assert(size == 16*sizeof(uint8_t));
 
-      d.type = encode_fixlen_maybe_endianness;
+			// d.type = encode_fixlen_maybe_endianness;
+			d.type = Decision::encode_fixlen;
       d.unencoded_length = size;
       d.encoded_length = size;
       break;
@@ -629,311 +632,292 @@ uint16_t EncodePlan::execute(uint8_t* buf, uint16_t offset,
   return ret;
 }
 
-
 namespace libfc {
 
-  static const unsigned int message_header_index = 0;
-  static const unsigned int template_set_index = 1;
+PlacementExporter::PlacementExporter(uint32_t _observation_domain, uint8_t* msg_buf, 
+	uint32_t msg_buf_size, uint32_t* _sequence_number_ptr)
+{
+	current_tpl = NULL;
+	current_plan = NULL;
+	sequence_number_ptr = _sequence_number_ptr;
+	n_templates = 0;
+	observation_domain = _observation_domain;
+	buf = msg_buf;
+	buf_pos = msg_buf;
+	buf_size = msg_buf_size;
+	buf_bytes_left = msg_buf_size;
+	template_flowset_closed = false;
+}
 
-  PlacementExporter::PlacementExporter(ExportDestination& _os,
-                                       uint32_t _observation_domain)
-    : os(_os),
-      current_template(0),
-      current_template_id(255),
-      sequence_number(0),
-      observation_domain(_observation_domain), 
-      n_message_octets(kIpfixMessageHeaderLen),
-      template_set_size(0),
-      plan(0)
-#if defined(_libfc_HAVE_LOG4CPLUS_)
-    , logger(log4cplus::Logger::getInstance(LOG4CPLUS_TEXT("PlacementExporter")))
-#endif /* defined(_libfc_HAVE_LOG4CPLUS_) */
- {
-    /* Push two empty iovecs into the iovec vector, to be filled later
-     * with the message header and template set by flush(). */
-   LOG4CPLUS_TRACE(logger, "First resize for message header and template set");
-   iovecs.resize(2);
-   iovecs[message_header_index].iov_base = 0;
-   iovecs[message_header_index].iov_len = 0;
-   iovecs[template_set_index].iov_base = 0;
-   iovecs[template_set_index].iov_len = 0;
-  }
+void
+PlacementExporter::fini(void)
+{
+	for (int i=0; i<n_templates; i++)
+		delete templates[i].plan;
+	n_templates = 0;
+}
 
-  PlacementExporter::~PlacementExporter() {
-    flush();
 
-    delete plan;
+PlacementExporter::~PlacementExporter() 
+{
+	fini();
+}
 
-    for (auto i = iovecs.begin(); i != iovecs.end(); ++i)
-      delete[] static_cast<uint8_t*>(i->iov_base);
-  }
-
-  static void encode16(uint16_t val, uint8_t** buf,
-                       const uint8_t* buf_end) {
-    assert(*buf < buf_end);
-    assert(*buf + sizeof(uint16_t) <= buf_end);
+static void 
+enc16(uint16_t val, uint8_t** buf) 
+{
     *(*buf)++ = (val >> 8) & 0xff;
     *(*buf)++ = (val >> 0) & 0xff;
-    assert(*buf <= buf_end);
-  }
+}
 
-  static void encode32(uint32_t val, uint8_t** buf,
-                       const uint8_t* buf_end) {
-    assert(*buf < buf_end);
-    assert(*buf + sizeof(uint32_t) <= buf_end);
+static void 
+enc32(uint32_t val, uint8_t** buf) {
     *(*buf)++ = (val >> 24) & 0xff;
     *(*buf)++ = (val >> 16) & 0xff;
     *(*buf)++ = (val >>  8) & 0xff;
     *(*buf)++ = (val >>  0) & 0xff;
-    assert(*buf <= buf_end);
-  }
-
-  void PlacementExporter::finish_current_data_set() {
-    iovec& l = iovecs.back();
-
-    if (l.iov_len > 0) {
-      LOG4CPLUS_TRACE(logger, "finishing current data set, len="
-                      << l.iov_len);
-
-      assert(l.iov_base != 0);
-      uint8_t* buf = static_cast<uint8_t*>(l.iov_base);
-      const uint8_t* buf_end = buf + 2*sizeof(uint16_t);
+}
       
-      encode16(current_template->get_template_id(), &buf, buf_end);
-      encode16(l.iov_len, &buf, buf_end);
-    }
-  }
+/*
+ *	Start new message
+ */
+int
+PlacementExporter::start_message(time_t now, bool inc_sequence_number)
+{
+	/* reset buf */
+	buf_pos = buf;
 
-#if defined(_libfc_HAVE_LOG4CPLUS_)
-  static const char* make_time(uint32_t export_time) {
-    struct tm tms;
-    time_t then = export_time;
-    static char gmtime_buf[100];
+	if (buf_size < kIpfixMessageHeaderLen)
+		return -1;
 
-    gmtime_r(&then, &tms);
-    strftime(gmtime_buf, sizeof gmtime_buf, "%c", &tms);
-    gmtime_buf[sizeof(gmtime_buf) - 1] = '\0';
+	buf_bytes_left = buf_size - kIpfixMessageHeaderLen;		
 
-    return gmtime_buf;
-  }
-#endif /* defined(_libfc_HAVE_LOG4CPLUS_) */
+	/* message header */
+	enc16(kIpfixVersion, &buf_pos);
 
-  bool PlacementExporter::flush() {
-    LOG4CPLUS_TRACE(logger, "ENTER flush");
-    /** Return value. */
-    ssize_t ret = 0;
+	/* save place for the message length */ 
+	message_len = kIpfixMessageHeaderLen;
+	message_len_addr = buf_pos;
+	buf_pos += sizeof(message_len);
 
-    /* Only write something if we have anything nontrivial to write. */
-    if (n_message_octets > kIpfixMessageHeaderLen) {
-      /** This message header.
-       *
-       * This variable is dynamically allocated so as to facilitate
-       * its deletion later as part of the iovecs vector. */
-      uint8_t* message_header = new uint8_t[kIpfixMessageHeaderLen];
+	enc32(static_cast<uint32_t>(now), &buf_pos);
+	enc32(*sequence_number_ptr, &buf_pos);
+	enc32(observation_domain, &buf_pos);
+
+	if (inc_sequence_number)
+		atomic_inc_uint(sequence_number_ptr);
       
-      /** Points to the end of this message.
-       *
-       * Used for range checks. */
-      const uint8_t* message_end = message_header + kIpfixMessageHeaderLen;
-      
-      /** Moves through the message header. */
-      uint8_t* p = message_header;
-      
-      time_t now = time(0);
-      if (now == static_cast<time_t>(-1))
-        return false;
-      
-      /* Message header */
-      encode16(kIpfixVersion, &p, message_end);
-      encode16(static_cast<uint16_t>(n_message_octets), &p, message_end);
-      encode32(static_cast<uint32_t>(now), &p, message_end);
-      encode32(sequence_number++, &p, message_end);
-      encode32(observation_domain, &p, message_end);
-      
-      iovecs[message_header_index].iov_base = message_header;
-      iovecs[message_header_index].iov_len = kIpfixMessageHeaderLen;
-      
-      LOG4CPLUS_TRACE(logger, "writing message with "
-                      << "version=" << kIpfixVersion
-                      << ", length=" << n_message_octets
-                      << ", export-time=" << make_time(now)
-                      << ", sequence=" << (sequence_number - 1)
-                      << ", domain=" << observation_domain);
-      LOG4CPLUS_TRACE(logger, "" << iovecs.size() << " iovecs");
+	template_flowset_closed = false;
+	current_tpl = NULL;
 
-      /* Template set, if any */
-      if (new_templates.size() != 0) {
-        LOG4CPLUS_TRACE(logger, "writing template set...");
+	return 0;
+}
 
-        iovecs[template_set_index].iov_len = template_set_size;
-        iovecs[template_set_index].iov_base = new uint8_t[template_set_size];
-        uint8_t* buf
-          = static_cast<uint8_t*>(iovecs[template_set_index].iov_base);
-        const uint8_t* buf_end = buf + template_set_size;
+/*
+ *
+ */
+void
+PlacementExporter::finish_message(void)
+{
+	libfc_printf("finish_message, msg size %hu\n", message_len);
+	assert(message_len_addr != NULL);
+	uint16_t _message_len = rte_cpu_to_be_16(message_len);
+	memcpy(message_len_addr, &_message_len, sizeof(message_len));
+}
 
-        encode16(2, &buf, buf_end);
-        encode16(template_set_size, &buf, buf_end);
+/*
+ *	Wrire template flowset
+ *
+ *  Returns:
+ *     0 - ok
+ *    <0 - error
+ */
 
-        for (auto t = new_templates.begin(); t != new_templates.end(); ++t) {
-          const uint8_t* this_template;
-          size_t this_template_size;
 
-          (*t)->wire_template(0, &this_template, &this_template_size);
-          assert(buf + this_template_size <= buf_end);
-          memcpy(buf, this_template, this_template_size);
-          buf += this_template_size;
-        }
-      }
+/*
+ * Returns:
+ *  0 - ok
+ *  < 0 - error
+*/
+int
+PlacementExporter::write_templates(void)
+{
+	if (n_templates == 0)
+		return 0;
+		
+	if (buf_bytes_left < FLOWSET_HDR_LEN)
+		return -1;
+		
+	uint16_t len = FLOWSET_HDR_LEN;
+	uint8_t *len_addr;
+	
+	/* V10 - IPFIX */
+	enc16(k_flow_set_id, &buf_pos);
+	/* save space for flowset length */
+	len_addr = buf_pos;
+	buf_pos += sizeof(len);
+	buf_bytes_left -= FLOWSET_HDR_LEN;
 
-      LOG4CPLUS_TRACE(logger, "finish 2");
-      finish_current_data_set();
+	libfc_printf("write templates: %hhu\n", n_templates);
+	for (int i=0; i<n_templates; i++) {
+		struct template_plan* tp = &templates[i];
+		int tpl_size = tp->tpl->wire_template(tp->tpl_id, 
+			buf_pos, buf_bytes_left);
+		if (tpl_size < 0) 
+			return -1;
+		buf_pos += tpl_size;
+		buf_bytes_left -= tpl_size;
+		len += tpl_size;
+	}
 
-      ret = os.writev(iovecs);
-      LOG4CPLUS_TRACE(logger, "wrote " << ret << " bytes");
+	/* write flowset length to the saved position */
+	message_len += len;
+	len = rte_cpu_to_be_16(len);
+	memcpy(len_addr, &len, sizeof(len));
+	return 0;
+}
 
-#if defined(_libfc_HAVE_LOG4CPLUS_)
-      int n = 0;
-#endif /* defined(_libfc_HAVE_LOG4CPLUS_) */
-      for (auto i = iovecs.begin(); i != iovecs.end(); ++i) {
-        LOG4CPLUS_TRACE(logger, "  iovec " << ++n
-                        << " size " << i->iov_len);
-        delete[] static_cast<uint8_t*>(i->iov_base);
-      }
-      iovecs.clear();
-      new_templates.clear();
-      template_set_size = 0;
-
-      LOG4CPLUS_TRACE(logger, "Making space for new message header");
-      iovecs.resize(2);
-      iovecs[message_header_index].iov_base = 0;
-      iovecs[message_header_index].iov_len = 0;
-      iovecs[template_set_index].iov_base = 0;
-      iovecs[template_set_index].iov_len = 0;
-      
-      n_message_octets = kIpfixMessageHeaderLen;
-    }
-    return ret;
-  }
-
-  void PlacementExporter::place_values(const PlacementTemplate* tmpl) {
-    LOG4CPLUS_TRACE(logger, "ENTER place_values");
-
-    assert(n_message_octets <= kMaxMessageLen);
-
-    /** The number of bytes added to the current message as a result
-     * of issuing this new data record.  It might be as small as the
-     * number of bytes in the representation of this data record, and
-     * it might be as large as that number, plus the size of a new
-     * template set containing the wire template for the template
-     * used. */
-    size_t record_size = tmpl->data_record_size();
-    size_t new_bytes = record_size;
-    bool make_new_data_set = false;
-
-    LOG4CPLUS_TRACE(logger, "place_values: adding "
-                    << new_bytes << " new bytes");
-
-    /** Will contain tmpl if this template is hitherto unknown. */
-    const PlacementTemplate* unknown_template = 0;
-
-    if (tmpl != current_template) {
-      LOG4CPLUS_TRACE(logger, "template not current");
-      /* We need to insert a new template and start a new data set if
-       *
-       *  - the underlying transport is connection-oriented and we
-       *    have never seen the template; or
-       *  - the underlying transport is connectionless and we haven't
-       *    seen the template in this message so far.
+/*
+ * Store flowset header to the buffer
        */
-      if (used_templates.find(tmpl) == used_templates.end()) {
-        LOG4CPLUS_TRACE(logger, "template not known, inserting");
-        unknown_template = tmpl;
+void 
+PlacementExporter::finish_flowset(void)
+{
+	libfc_printf("finish_flowset: len %hu, tpl id %hu\n", flowset_len, current_tpl_id);
+	
+	assert(current_tpl != NULL);
+	enc16(current_tpl_id, &flowset_hdr_addr);
+	enc16(flowset_len, &flowset_hdr_addr);
+	message_len += flowset_len;
+}
 
-        /* Need to create template set? */
-        if (template_set_size == 0) {
-          template_set_size += kIpfixSetHeaderLen;
-          new_bytes += kIpfixSetHeaderLen;
-          LOG4CPLUS_TRACE(logger, "need to create new template set, now "
-                          << new_bytes << " new bytes");
-        }
+void
+PlacementExporter::start_flowset(void)
+{
+	libfc_printf("start_flowset\n");
+	
+	flowset_len = FLOWSET_HDR_LEN;
+	/* save space in the buffer */
+	flowset_hdr_addr = buf_pos;
+	buf_pos += FLOWSET_HDR_LEN;
+	buf_bytes_left -= FLOWSET_HDR_LEN;
+}
 
-        /* Need to add a new template to the template record section */
-        size_t template_bytes = 0;
-        tmpl->wire_template(++current_template_id, 0, &template_bytes);
-        new_bytes += template_bytes;
-        template_set_size += template_bytes;
-        new_templates.insert(tmpl);
+struct template_plan*
+PlacementExporter::find_template(const PlacementTemplate* tpl)
+{
+	for (int i=0; i<n_templates; i++)
+		if (templates[i].tpl == tpl)
+			return &templates[i];
 
-        LOG4CPLUS_TRACE(logger, "computed wire template, now "
-                        << new_bytes << " new bytes");
+	return NULL;
+}
 
-        /* Switch to new template here already, but only if this is
-         * the very first template we see. */
-        if (current_template == 0)
-          current_template = tmpl;
-      }
+/*
+ *
+ */
+int
+PlacementExporter::add_template(PlacementTemplate* tpl, uint16_t template_id)
+{
+	struct template_plan* tp = find_template(tpl);
+	if (tp != NULL)
+		/* already exists */
+		return 1;
 
-      LOG4CPLUS_TRACE(logger, "finish 1");
-      finish_current_data_set();
+	if (n_templates == IPFIX_MAX_TPLS)
+		/* max number of templates already added */
+		return -1;
+	
+	EncodePlan* plan = new EncodePlan(tpl);
+		
+	templates[n_templates].tpl = tpl;
+	templates[n_templates].plan = plan;
+	templates[n_templates].tpl_id = template_id;
+	n_templates++;
+	return 0;
+}	
 
-      make_new_data_set = true;
+/*
+ *
+ */
+void
+PlacementExporter::place_values(PlacementTemplate* tpl, bool _write_templates)
+{
+	libfc_printf("place_values\n");
+	
+	if (!template_flowset_closed) {
+		if (_write_templates)
+			write_templates();
+		template_flowset_closed = true;
+	}
+	
+	if (tpl != current_tpl || current_tpl == NULL) {
+		struct template_plan* tp = find_template(tpl);
+		/* tpl should be already added */
+		assert(tp);
+		if (current_tpl != NULL)
+			finish_flowset();
+		current_tpl = tp->tpl;
+		current_plan = tp->plan;
+		current_tpl_id = tp->tpl_id;
+		start_flowset();
+	}
+	
+	/* write data flow */
+	uint16_t offs = buf_pos - buf;
+	uint16_t flow_size = current_plan->execute(buf, offs, buf_size);
+	libfc_printf("flow saved %hu\n", flow_size);
+	assert(buf_bytes_left >= flow_size);
+	buf_pos += flow_size;
+	buf_bytes_left -= flow_size;
+	flowset_len += flow_size;
+}
 
-      delete plan;
-      plan = new EncodePlan(tmpl);
+/*
+ *
+ */
+int
+PlacementExporter::complete_message(void)
+{
+	libfc_printf("complete_message\n");
+	
+	if (!template_flowset_closed) {
+		int ret = write_templates();
+		if (ret < 0)
+			return ret;
+		template_flowset_closed = true;
     }
 
-    size_t prospective_data_set_header
-      = make_new_data_set ? kIpfixSetHeaderLen : 0;
-    if (n_message_octets + new_bytes + prospective_data_set_header
-        > os.preferred_maximum_message_size()) {
-      LOG4CPLUS_TRACE(logger,
-                      "Flushing because n_message_octets ("
-                      << n_message_octets
-                      << ") + new_bytes (" << new_bytes
-                      << ") > preferred ("
-                      << os.preferred_maximum_message_size());
-      flush();
-      make_new_data_set = true;
-    }
+	if (current_tpl != NULL)
+		finish_flowset();
 
-    if (make_new_data_set) {
-      LOG4CPLUS_TRACE(logger, "make new data set");
-      iovecs.resize(iovecs.size() + 1);
+	finish_message();
+	return message_len;
+}
 
-      iovec& l = iovecs.back();
+/*
+ * After a reset templates should be added again.
+ */
+void
+PlacementExporter::reset(void)
+{
+	template_flowset_closed = true;
+	current_tpl = NULL;
+	current_plan = NULL;
+	fini();
+}
 
-      l.iov_base = new uint8_t[kMaxMessageLen];
-      l.iov_len = kIpfixSetHeaderLen;
-      new_bytes += kIpfixSetHeaderLen;
-    }
-
-#if defined(_libfc_HAVE_LOG4CPLUS_)
-    if (n_message_octets + new_bytes > kMaxMessageLen)
-      LOG4CPLUS_TRACE(logger,
-                      "n_message_octets=" << n_message_octets
-                      << ", new_bytes=" << new_bytes);
-#endif /* defined(_LIBGC_HAVE_LOG4CPLUS_) */
-    n_message_octets += new_bytes;
-    assert(n_message_octets <= kMaxMessageLen);
-
-    if (unknown_template != 0)
-      used_templates.insert(unknown_template);
-
-    iovec& l = iovecs.back();
-    assert(l.iov_base != 0);
-    uint16_t enc_bytes 
-      = plan->execute(static_cast<uint8_t*>(l.iov_base),
-                      l.iov_len, kMaxMessageLen);
-    assert(enc_bytes == record_size);
-    l.iov_len += enc_bytes;
-
-    /* Either we already have current_template == tmpl, in which case
-     * nothing happens, or current_template != tmpl, in which case we
-     * need to switch to tmpl. */
-    current_template = tmpl;
-
-
-    assert(n_message_octets <= kMaxMessageLen);
-  }
+/*
+ * Set a new buffer
+ */
+void
+PlacementExporter::set_buf(uint8_t* _buf, uint32_t _buf_size)
+{
+	buf = _buf;
+	buf_size = _buf_size;
+	buf_pos = _buf;
+	buf_bytes_left = _buf_size;
+	template_flowset_closed = false;
+} 
 
 } // namespace libfc

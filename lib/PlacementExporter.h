@@ -31,130 +31,62 @@
  */
 
 #ifndef _libfc_PLACEMENTEXPORTER_H_
-#  define _libfc_PLACEMENTEXPORTER_H_
+#define _libfc_PLACEMENTEXPORTER_H_
 
-#  include <cstdint>
-#  include <list>
-#  include <set>
-#  include <vector>
+#include <cstdint>
+#include <list>
+#include <set>
+#include <vector>
 
-#  include <sys/uio.h>
+#include <sys/uio.h>
 
-#  if defined(_libfc_HAVE_LOG4CPLUS_)
-#    include <log4cplus/logger.h>
-#  endif /* defined(_libfc_HAVE_LOG4CPLUS_) */
+#if defined(_libfc_HAVE_LOG4CPLUS_)
+#include <log4cplus/logger.h>
+#endif /* defined(_libfc_HAVE_LOG4CPLUS_) */
 
-#  include "Constants.h"
-#  include "ExportDestination.h"
-#  include "PlacementTemplate.h"
+#include "Constants.h"
+#include "ExportDestination.h"
+#include "PlacementTemplate.h"
+#include <rte_byteorder.h>
+
+#ifndef atomic_inc_uint
+#define	atomic_inc_uint(x)	__sync_fetch_and_add(x, 1)
+#endif
 
 class EncodePlan;
 
 namespace libfc {
 
-  /** Interface for exporter with the placement interface.
-   *
-   * A simple example of how to use the placement interface for export
-   * is this (with error checking omitted):
-   *
-   * @code
-   * FileExportDestination d(some_file_descriptor);
-   * PlacementExporter e(d, my_observation_domain);
-   *
-   * uint64_t flow_start_milliseconds = 0;
-   * uint32_t source_ip_v4_address = 0;
-   *
-   * PlacementTemplate* my_flow_template = new PlacementTemplate();
-   * 
-   * my_flow_template->register_placement(
-   *   InfoModel::instance().lookupIE("flowStartMilliseconds"),
-   *   &flow_start_milliseconds, 0);
-   * my_flow_template->register_placement(
-   *   InfoModel::instance().lookupIE("sourceIPv4Address"),
-   *   &source_ip_v4_address, 0);
-   *
-   * // Assign values to source_ip_v4_address and flow_start_milliseconds
-   *
-   * e.place_values(my_flow_template);
-   * e.flush();
-   *
-   * delete my_flow_template
-   *
-   * close(some_file_descriptor);
-   * @endcode
-   *
-   * See the documentation for ExportDestination,
-   * FileExportDestination, and PlacementTemplate for more
-   * information.
-   */
-  class PlacementExporter {
-  public:
-    /** Creates an exporter.
-     *
-     * @param os the output stream to use
-     * @param observation_domain the observation domain; see RFC5101
-     */
-    PlacementExporter(ExportDestination& os, uint32_t observation_domain);
+struct template_plan {
+	PlacementTemplate* tpl;
+	EncodePlan* plan;
+	uint16_t tpl_id;
+};
 
-    /** Destroys an exporter.
-     *
-     * Will, as a side effect, flush and close the export
-     * destination.
-     */
-    ~PlacementExporter();
-    
-    /** Finishes the current message and sends it.
-     *
-     * @return true if the operation was successful, false otherwise
-     */
-    bool flush();
+#define IPFIX_MAX_TPLS 4
+#define FLOWSET_HDR_LEN 4
+#define FLOWSET_VERSION 2
 
-    /** Place values in a PlacementTemplate into the message. 
-     *
-     * @param template placement template for current placement
-     */
-    void place_values(const PlacementTemplate* tmpl);
+#ifdef LFC_DEBUG_PRINTF
+#define libfc_printf(...) printf(__VA_ARGS__)
+#else
+#define libfc_printf(...)
+#endif
 
-  private:
-
-    ExportDestination& os;
-    /* The expression of cont-ness for the PlacementTemplates pointed
-     * to by the pointers below is very tricky.  From the point of
-     * view of this object, they are const: we promise never to change
-     * any data member or to call any mutator in the PlacementTemplate
-     * objects. On the other hand, the caller also holds copies of
-     * these pointers, and in fact the caller is *expected* to change
-     * data members, so for the caller the pointer is not const.
-     *
-     * I don't know what kinds of things C++ compilers can
-     * legitimately assume about const pointers.  If they can assume
-     * that data values will not change in objects pointed to by const
-     * pointers, then this could be very bad and the const would have
-     * to be removed throughout.
-     */
-
-    /** The template currently in use.
-     *
-     * As long as this doesn't change, we don't need to open another
-     * data set or another template set. */
-    const PlacementTemplate* current_template;
-
-    /** All templates used so far in this session or message.
-     *
-     * In this set, we capture all templates used so far in this
-     * session.  When a data record comes along that belongs to a
-     * hitherto unknown template, that template is inserted here, and
-     * a new template is issued. */
-    std::set<const PlacementTemplate*> used_templates;
+class PlacementExporter {
+private:	
+	PlacementTemplate* current_tpl;
+	EncodePlan* current_plan;
 
     /** Templates that need to go into this message's template record. */
-    std::set<const PlacementTemplate*> new_templates;
+	struct template_plan templates[IPFIX_MAX_TPLS];
+	uint8_t n_templates;
 
     /** Most recently assigned template id. */
-    uint16_t current_template_id;
+	uint16_t current_tpl_id;
 
     /** Sequence number for messages; see RFC 5101. */
-    uint32_t sequence_number;
+	uint32_t* sequence_number_ptr;
 
     /** Observation domain for messages; see RFC 5101.
      *
@@ -164,31 +96,62 @@ namespace libfc {
 
     /** Number of octets in this message so far. This includes message
      * and set headers, template sets and data sets. */
-    size_t n_message_octets;
+	uint16_t message_len;
+	uint8_t* message_len_addr;
 
-    /** Number of octets in template set, or 0 if no template set. */
-    uint16_t template_set_size;
+	uint16_t flowset_len;
+	uint8_t* flowset_hdr_addr;
 
-    /** The number of octets in the currently assembled set.
-     *
-     * The space between `<' and `::' is mandatory because of the
-     * trigraph `<::', which stands for `['.  Who came up with this
-     * crap? */
-    std::vector< ::iovec> iovecs;
+	bool template_flowset_closed;
 
-    EncodePlan* plan;
+	/* message buffer */
+	uint8_t* buf;
+	uint8_t* buf_pos;
+	uint32_t buf_size;
+	uint32_t buf_bytes_left;	
 
-#  if defined(_libfc_HAVE_LOG4CPLUS_)
-    log4cplus::Logger logger;
-#  endif /* defined(_libfc_HAVE_LOG4CPLUS_) */
+	struct template_plan*
+	find_template(const PlacementTemplate* tpl);
 
-    /** Finishes the current data set by putting the template ID and
-     * set length into the set header. 
-     *
-     * This function is idempotent.
-     */
-    void finish_current_data_set();
-  };
+	void
+	fini(void);			
+
+	void
+	start_flowset(void);
+		
+	void 
+	finish_flowset(void);
+
+	int
+	write_templates(void);
+
+	void
+	finish_message(void);
+	
+public:
+	PlacementExporter(uint32_t _observation_domain, uint8_t* msg_buf,
+		uint32_t msg_buf_size, uint32_t* _sequence_number_ptr);
+
+	~PlacementExporter();
+	
+	void
+	reset(void);
+	
+	void
+	place_values(PlacementTemplate* tpl, bool _write_templates);
+		
+	int
+	add_template(PlacementTemplate* tpl, uint16_t template_id);		
+		
+	int
+	start_message(time_t now, bool inc_sequence_number);
+		
+	int
+	complete_message(void);
+	
+	void
+	set_buf(uint8_t* _buf, uint32_t _buf_size);
+};
 
 } // namespace libfc
 

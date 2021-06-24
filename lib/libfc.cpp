@@ -36,10 +36,12 @@
 #include "InfoModel.h"
 #include "PlacementTemplate.h"
 #include "PlacementCollector.h"
-#include "FileInputSource.h"
-#include "WandioInputSource.h"
+// #include "FileInputSource.h"
+// #include "WandioInputSource.h"
 #include "exceptions/FormatError.h"
 #include "exceptions/IESpecError.h"
+#include "PlacementExporter.h"
+#include "BufExportDestination.h"
 
 #if defined(_libfc_HAVE_LOG4CPLUS_)
 #  include <log4cplus/configurator.h>
@@ -135,7 +137,9 @@ struct libfc_template_group_t {
   CBinding* binding;
 };
 
-extern struct libfc_template_group_t* libfc_template_group_new(int version) {
+extern struct 
+libfc_template_group_t* libfc_template_group_new(int version) 
+{
   PlacementCollector::Protocol protocol;
     
   if (!infomodel_initialized)
@@ -158,8 +162,16 @@ extern struct libfc_template_group_t* libfc_template_group_new(int version) {
   return ret;
 }
 
-extern struct libfc_template_t* libfc_template_new(
-    struct libfc_template_group_t* s) {
+extern void 
+libfc_template_group_delete(struct libfc_template_group_t* s) 
+{
+	delete s->binding;
+	delete s;
+}
+
+extern struct libfc_template_t* 
+libfc_template_new(struct libfc_template_group_t* s) 
+{
   if (!infomodel_initialized)
     InfoModel::instance().defaultIPFIX();
   infomodel_initialized = true;
@@ -170,54 +182,60 @@ extern struct libfc_template_t* libfc_template_new(
   return ret;
 }
 
-extern void libfc_template_group_delete(struct libfc_template_group_t* s) {
-  delete s->binding;
-}
-
-extern int libfc_register_placement(struct libfc_template_t* t,
-                                    const char* ie_name, void* p, size_t size) {
+extern int 
+libfc_register_placement(struct libfc_template_t* t,
+		const char* ie_name, void* p, size_t size) 
+{
   return t->tmpl.register_placement(
            InfoModel::instance().lookupIE(ie_name), p, size);
 }
 
-extern void libfc_register_callback(struct libfc_template_t* t,
-                                    int (*c) (const struct libfc_template_t*, 
-                                               void *),
-                                    void *vparg) {
+extern void 
+libfc_register_callback(struct libfc_template_t* t,
+		int (*c) (const struct libfc_template_t*, void *), void *vparg) 
+{
   t->callback = c;
   t->vparg = vparg;
 }
 
-extern int libfc_collect_from_file(int fd, const char* name,
-                                   struct libfc_template_group_t* t) {
+extern int 
+libfc_collect_from_file(int fd, const char* name, 
+		struct libfc_template_group_t* t) 
+{
   int ret = 1;
 
-  FileInputSource is(fd, name);
-  try {
-    t->binding->collect(is);
-  } catch (FormatError e) {
-    std::cerr << "Format error: " << e.what() << std::endl;
-    ret = 0;
-  }
+//	FileInputSource is(fd, name);
+//	try {
+//		t->binding->collect(is);
+//	} catch (FormatError e) {
+//		std::cerr << "Format error: " << e.what() << std::endl;
+//		ret = 0;
+//	}
 
   return ret;
 }
 
-extern int libfc_collect_from_wandio(io_t *wio, const char *name, struct libfc_template_group_t* t) {
+extern int 
+libfc_collect_from_wandio(io_t *wio, const char *name, 
+		struct libfc_template_group_t* t) 
+{
   int ret = 1;
 
-  WandioInputSource is(wio, name);
-  try {
-    t->binding->collect(is);
-  } catch (FormatError e) {
-    std::cerr << "Format error: " << e.what() << std::endl;
-    ret = 0;
-  }
+//	WandioInputSource is(wio, name);
+//	try {
+//		t->binding->collect(is);
+//	} 
+//	catch (FormatError e) {
+//		std::cerr << "Format error: " << e.what() << std::endl;
+//		ret = 0;
+//	}
 
   return ret;
 }
 
-extern void libfc_initialize_logging(const char *lpfilename) {
+extern void 
+libfc_initialize_logging(const char *lpfilename) 
+{
 #if defined(_libfc_HAVE_LOG4CPLUS_)
     log4cplus::PropertyConfigurator config(lpfilename);
     config.configure();
@@ -225,7 +243,9 @@ extern void libfc_initialize_logging(const char *lpfilename) {
 #endif /* defined(_libfc_HAVE_LOG4CPLUS_) */
 }
 
-extern int libfc_add_specfile(const char *specfilename) {
+extern int 
+libfc_add_specfile(const char *specfilename) 
+{
     int i = 0;
     std::ifstream iespecs(specfilename);
     if (!iespecs) return 0;
@@ -243,3 +263,73 @@ extern int libfc_add_specfile(const char *specfilename) {
     return i;
 }
 
+extern placement_exporter_t*
+libfc_placement_exporter_new(uint32_t observation_domain, uint8_t* msg_buf, 
+	uint32_t msg_buf_size, uint32_t* sequence_number_ptr)
+{
+	return (placement_exporter_t*) new PlacementExporter(
+		observation_domain, msg_buf, msg_buf_size, sequence_number_ptr);
+}
+
+extern void
+libfc_placement_exporter_delete(placement_exporter_t* pe)
+{
+	delete (PlacementExporter*) pe;
+}
+
+extern int
+libfc_placement_exporter_place_values(placement_exporter_t* pe, 
+		struct libfc_template_t* t, bool write_templates)
+{
+	try {
+		((PlacementExporter*)pe)->place_values(&t->tmpl, write_templates);
+		return 0;
+	} 
+	catch (...) {
+		return -1;
+	}
+}
+
+extern int
+libfc_placement_exporter_add_template(placement_exporter_t* pe, 
+		struct libfc_template_t* t, uint16_t template_id)
+{
+	try {
+		((PlacementExporter*)pe)->add_template(&t->tmpl, template_id);
+		return 0;
+	} 
+	catch (...) {
+		return -1;
+	}
+}
+
+extern void
+libfc_placement_exporter_reset(placement_exporter_t* pe)
+{
+	((PlacementExporter*)pe)->reset();
+}
+
+extern int
+libfc_placement_exporter_start_message(placement_exporter_t* pe, time_t now,
+		  bool inc_sequence_number)
+{
+	return ((PlacementExporter*)pe)->start_message(now, inc_sequence_number);
+}
+
+extern int
+libfc_placement_exporter_complete_message(placement_exporter_t* pe)
+{
+	try {
+		return ((PlacementExporter*)pe)->complete_message();
+	} 
+	catch (...) {
+		return -1;
+	}
+}
+
+extern void
+libfc_placement_exporter_set_buf(placement_exporter_t* pe, uint8_t* buf, 
+		  uint32_t buf_size)
+{
+	((PlacementExporter*)pe)->set_buf(buf, buf_size);
+}

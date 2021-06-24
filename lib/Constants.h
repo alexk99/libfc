@@ -44,8 +44,11 @@
 
 namespace libfc {
 
+  /* V10 IpFIX */
+  static const uint16_t k_flow_set_id = 2;
+
   /** IPFIX framing constant: message header version */
-  static const size_t kIpfixVersion = 10;
+  static const uint16_t kIpfixVersion = 10;
 
   /** IPFIX framing constant: message header length */
   static const size_t kIpfixMessageHeaderLen = 16;
