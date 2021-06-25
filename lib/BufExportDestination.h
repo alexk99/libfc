@@ -27,55 +27,35 @@
 
 /**
  * @file
- * @author Stephan Neuhaus <neuhaust@tik.ee.ethz.ch>
+ * @author Alex Kiselev <kiselev99@gmail.com>
  */
 
-#ifndef _libfc_WANDIOINPUTSOURCE_H_
-#  define _libfc_WANDIOINPUTSOURCE_H_
+#ifndef _libfc_BUFEXPORTDESTINATION_H_
+#  define _libfc_BUFEXPORTDESTINATION_H_
 
-#  include <string>
 
-extern "C" {
-#  include <wandio.h>
-}
-
-#  include "InputSource.h"
+#  include "ExportDestination.h"
 
 namespace libfc {
 
-  class WandioInputSource : public InputSource {
+  /** IPFIX buffer outputs. */
+  class BufExportDestination : public ExportDestination {
   public:
-    /** Creates a wandio input source from an io_t.
-     *
-     * @param io the io_t pointer belonging to a data file
-     * @param name the name you want this file to be known to diagnostics
-     */
-    WandioInputSource(io_t* io, std::string name);
+    BufExportDestination(char* _buf, size_t _buf_size);
 
-    /** Creates a wandio input source from a file name.
-     *
-     * @param name the file name
-     */
-    WandioInputSource(std::string name);
-
-    ~WandioInputSource();
-
-    ssize_t read(uint8_t* buf, uint16_t len);
-    ssize_t peek(uint8_t* buf, uint16_t len);
-    bool resync();
-    size_t get_message_offset() const;
-    void advance_message_offset();
-    const char* get_name() const;
-    bool can_peek() const;
+    ssize_t writev(const std::vector< ::iovec>& iovecs);
+    int flush();
+    bool is_connectionless() const;
+    size_t preferred_maximum_message_size() const;
+	size_t bytes_written() const;
+	void reset_buffer(char* _buf, size_t _buf_size);
 
   private:
-    io_t* io;
-    size_t message_offset;
-    size_t current_offset;
-    std::string name;
-    bool io_belongs_to_me;
+    char* buf;
+    size_t buf_size;
+    size_t buf_offs;
   };
 
 } // namespace libfc
 
-#endif // _libfc_WANDIOINPUTSOURCE_H_
+#endif // _libfc_BUFEXPORTDESTINATION_H_

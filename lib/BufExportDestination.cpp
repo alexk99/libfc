@@ -1,4 +1,3 @@
-/* Hi Emacs, please use -*- mode: C++; -*- */
 /* Copyright (c) 2011-2014 ETH Zürich. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without 
@@ -24,42 +23,55 @@
  * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+#include <unistd.h>
+#include <errno.h>
 
-/**
- * @file
- * @author Stephan Neuhaus <neuhaust@tik.ee.ethz.ch>
- */
-
-#ifndef _libfc_UDPINPUTSOURCE_H_
-#  define _libfc_UDPINPUTSOURCE_H_
-
-#  include "InputSource.h"
+#include "Constants.h"
+#include "BufExportDestination.h"
 
 namespace libfc {
 
-  class UDPInputSource : public InputSource {
-  public:
-    /** Creates a UDP input source from a file descriptor.
-     *
-     * @param sa the socket address of the peer from whom we accept messages
-     * @param sa_len the length of the socket address, in bytes
-     * @param fd the file descriptor belonging to a UDP socket
-     */
-    UDPInputSource(const struct sockaddr* sa, size_t sa_len, int fd);
+BufExportDestination::BufExportDestination(char* _buf, size_t _buf_size): 
+	buf(_buf), buf_size(_buf_size), buf_offs(0)
+{
+}
 
-    ssize_t read(uint8_t* buf, uint16_t len);
-    bool resync();
-    size_t get_message_offset() const;
-    void advance_message_offset();
-    const char* get_name() const;
-    bool can_peek() const;
+ssize_t
+BufExportDestination::writev(const std::vector< ::iovec>& iovecs) {
+	const struct iovec *iov = iovecs.data();
+	for (unsigned i=0; i<iovecs.size(); i++,iov++) {
+		if (iov->iov_len > buf_size - buf_offs)
+			/* not enougth space int the buffer */
+			return -1;
+		memcpy(&buf[buf_offs], iov->iov_base, iov->iov_len);
+		buf_offs+=iov->iov_len;
+	}
+	return 0;
+}
 
-  private:
-    struct sockaddr sa;
-    size_t sa_len;
-    int fd;
-  };
+int 
+BufExportDestination::flush() {
+	return 0;
+}
+
+bool 
+BufExportDestination::is_connectionless() const {
+	return false;
+}
+
+size_t BufExportDestination::preferred_maximum_message_size() const {
+	return kMaxMessageLen;
+}
+
+size_t BufExportDestination::bytes_written() const {
+	return buf_offs;
+}
+
+void 
+BufExportDestination::reset_buffer(char* _buf, size_t _buf_size) {
+	buf_offs = 0;
+	buf = _buf;
+	buf_size = _buf_size;
+}
 
 } // namespace libfc
-
-#endif // _libfc_UDPINPUTSOURCE_H_
